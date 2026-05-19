@@ -30,6 +30,7 @@ public class ApiGatewayV2Service {
     private final StorageBackend<String, RouteResponse> routeResponseStore;
     private final StorageBackend<String, IntegrationResponse> integrationResponseStore;
     private final StorageBackend<String, Model> modelStore;
+    private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -51,6 +52,8 @@ public class ApiGatewayV2Service {
         this.integrationResponseStore = storageFactory.create("apigatewayv2", "apigatewayv2-integrationresponses.json",
                 new TypeReference<>() {});
         this.modelStore = storageFactory.create("apigatewayv2", "apigatewayv2-models.json",
+                new TypeReference<>() {});
+        this.vpcLinkStore = storageFactory.create("apigatewayv2", "apigatewayv2-vpclinks.json",
                 new TypeReference<>() {});
         this.regionResolver = regionResolver;
     }
@@ -373,6 +376,7 @@ public class ApiGatewayV2Service {
         integration.setConnectionType((String) request.get("connectionType"));
         integration.setPayloadFormatVersion((String) request.getOrDefault("payloadFormatVersion", "2.0"));
         integration.setIntegrationMethod((String) request.get("integrationMethod"));
+        integration.setConnectionId((String) request.get("connectionId"));
         integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
 
         if (request.get("timeoutInMillis") != null) {
@@ -429,6 +433,9 @@ public class ApiGatewayV2Service {
         if (request.containsKey("integrationMethod") && request.get("integrationMethod") != null) {
             integration.setIntegrationMethod((String) request.get("integrationMethod"));
         }
+        if (request.containsKey("connectionId") && request.get("connectionId") != null) {
+            integration.setConnectionId((String) request.get("connectionId"));
+        }
         if (request.containsKey("templateSelectionExpression") && request.get("templateSelectionExpression") != null) {
             integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
         }
@@ -453,6 +460,77 @@ public class ApiGatewayV2Service {
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;
+    }
+
+    // ──────────────────────────── VPC Link CRUD ────────────────────────────
+
+    public VpcLink createVpcLink(String region, Map<String, Object> request) {
+        VpcLink vpcLink = new VpcLink();
+        vpcLink.setVpcLinkId(shortId(8));
+        vpcLink.setName((String) request.get("name"));
+        vpcLink.setVpcLinkStatus("AVAILABLE");
+
+        @SuppressWarnings("unchecked")
+        List<String> securityGroupIds = (List<String>) request.get("securityGroupIds");
+        if (securityGroupIds != null) {
+            vpcLink.setSecurityGroupIds(securityGroupIds);
+        }
+
+        @SuppressWarnings("unchecked")
+        List<String> subnetIds = (List<String>) request.get("subnetIds");
+        if (subnetIds != null) {
+            vpcLink.setSubnetIds(subnetIds);
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+        if (tags != null) {
+            vpcLink.setTags(tags);
+        }
+
+        vpcLinkStore.put(vpcLinkKey(region, vpcLink.getVpcLinkId()), vpcLink);
+        return vpcLink;
+    }
+
+    public VpcLink getVpcLink(String region, String vpcLinkId) {
+        return vpcLinkStore.get(vpcLinkKey(region, vpcLinkId))
+                .orElseThrow(() -> new AwsException("NotFoundException", "VPC link not found", 404));
+    }
+
+    public List<VpcLink> getVpcLinks(String region) {
+        String prefix = region + "::";
+        return vpcLinkStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public void deleteVpcLink(String region, String vpcLinkId) {
+        getVpcLink(region, vpcLinkId);
+        vpcLinkStore.delete(vpcLinkKey(region, vpcLinkId));
+    }
+
+    public VpcLink updateVpcLink(String region, String vpcLinkId, Map<String, Object> request) {
+        VpcLink vpcLink = getVpcLink(region, vpcLinkId);
+
+        if (request.containsKey("name") && request.get("name") != null) {
+            vpcLink.setName((String) request.get("name"));
+        }
+        if (request.containsKey("securityGroupIds") && request.get("securityGroupIds") != null) {
+            @SuppressWarnings("unchecked")
+            List<String> securityGroupIds = (List<String>) request.get("securityGroupIds");
+            vpcLink.setSecurityGroupIds(securityGroupIds);
+        }
+        if (request.containsKey("subnetIds") && request.get("subnetIds") != null) {
+            @SuppressWarnings("unchecked")
+            List<String> subnetIds = (List<String>) request.get("subnetIds");
+            vpcLink.setSubnetIds(subnetIds);
+        }
+        if (request.containsKey("tags") && request.get("tags") != null) {
+            @SuppressWarnings("unchecked")
+            Map<String, String> tags = (Map<String, String>) request.get("tags");
+            vpcLink.setTags(tags);
+        }
+
+        vpcLinkStore.put(vpcLinkKey(region, vpcLinkId), vpcLink);
+        return vpcLink;
     }
 
     // ──────────────────────────── Stage CRUD ────────────────────────────
@@ -846,6 +924,10 @@ public class ApiGatewayV2Service {
 
     private String modelKey(String region, String apiId, String modelId) {
         return region + "::" + apiId + "::" + modelId;
+    }
+
+    private String vpcLinkKey(String region, String vpcLinkId) {
+        return region + "::" + vpcLinkId;
     }
 
     private static String shortId(int length) {

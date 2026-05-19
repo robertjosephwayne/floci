@@ -49,8 +49,12 @@ public class HttpProxyInvoker {
     private final RequestParameterMapper mapper = new RequestParameterMapper(new ContextValueResolver());
 
     public ProxyResult invoke(Integration integration, RequestContext ctx) {
+        return invoke(integration, ctx, integration.getIntegrationUri());
+    }
+
+    public ProxyResult invoke(Integration integration, RequestContext ctx, String integrationUri) {
         // 1. Resolve target URL from IntegrationUri template + captured path params
-        String resolvedUrl = PathTemplateResolver.resolve(integration.getIntegrationUri(), ctx.pathParams());
+        String resolvedUrl = PathTemplateResolver.resolve(integrationUri, ctx.pathParams());
 
         // 2. Determine HTTP method (integration.method=ANY/null means use the inbound method)
         String method = integration.getIntegrationMethod();
@@ -62,7 +66,7 @@ public class HttpProxyInvoker {
         ProxyRequestBuilder builder = new ProxyRequestBuilder(resolvedUrl, method);
         if (ctx.requestHeaders() != null) {
             for (Map.Entry<String, String> e : ctx.requestHeaders().entrySet()) {
-                if (!HOP_BY_HOP.contains(e.getKey().toLowerCase())) {
+                if (isForwardableHeader(e.getKey())) {
                     builder.overwriteHeader(e.getKey(), e.getValue());
                 }
             }
@@ -100,7 +104,7 @@ public class HttpProxyInvoker {
         }
 
         for (Map.Entry<String, List<String>> e : builder.headers().entrySet()) {
-            if (RESTRICTED.contains(e.getKey().toLowerCase())) continue;
+            if (!isForwardableHeader(e.getKey()) || RESTRICTED.contains(e.getKey().toLowerCase())) continue;
             for (String v : e.getValue()) {
                 hrb.header(e.getKey(), v);
             }
@@ -110,7 +114,7 @@ public class HttpProxyInvoker {
             HttpResponse<byte[]> resp = client.send(hrb.build(), HttpResponse.BodyHandlers.ofByteArray());
             Map<String, String> respHeaders = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> e : resp.headers().map().entrySet()) {
-                if (HOP_BY_HOP.contains(e.getKey().toLowerCase())) continue;
+                if (!isForwardableHeader(e.getKey())) continue;
                 respHeaders.put(e.getKey(), String.join(",", e.getValue()));
             }
             return new ProxyResult(resp.statusCode(), respHeaders, resp.body());
@@ -140,5 +144,9 @@ public class HttpProxyInvoker {
         return new ProxyResult(502,
                 Map.of("Content-Type", "application/json"),
                 body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static boolean isForwardableHeader(String name) {
+        return name != null && !name.startsWith(":") && !HOP_BY_HOP.contains(name.toLowerCase());
     }
 }

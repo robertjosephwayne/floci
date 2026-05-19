@@ -284,7 +284,14 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "%s",
                     "desiredCount": 1,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "loadBalancers": [
+                        {
+                            "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/test-tg/abc123",
+                            "containerName": "app",
+                            "containerPort": 80
+                        }
+                    ]
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
         .when()
@@ -295,6 +302,9 @@ class EcsIntegrationTest {
             .body("service.serviceArn", containsString(SERVICE_NAME))
             .body("service.clusterArn", containsString(CLUSTER_NAME))
             .body("service.desiredCount", equalTo(1))
+            .body("service.loadBalancers", hasSize(1))
+            .body("service.loadBalancers[0].containerName", equalTo("app"))
+            .body("service.loadBalancers[0].containerPort", equalTo(80))
             .body("service.status", equalTo("ACTIVE"))
         .extract()
             .path("service.serviceArn");
@@ -316,6 +326,7 @@ class EcsIntegrationTest {
             .statusCode(200)
             .body("services", hasSize(1))
             .body("services[0].serviceName", equalTo(SERVICE_NAME))
+            .body("services[0].loadBalancers[0].targetGroupArn", containsString("targetgroup/test-tg"))
             .body("services[0].status", equalTo("ACTIVE"))
             .body("failures", empty());
     }

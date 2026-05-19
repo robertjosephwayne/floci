@@ -77,6 +77,10 @@ class CloudFormationIntegrationTest {
         return member.substring(pStart, pEnd);
     }
 
+    private static String taskDefinitionArnRevisionPrefix(String taskDefinitionArn) {
+        return taskDefinitionArn.substring(0, taskDefinitionArn.lastIndexOf(':') + 1);
+    }
+
     @Test
     void createStack_withS3AndSqs() {
         String template = """
@@ -270,6 +274,404 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body("Configuration.FunctionName", equalTo("cfn-nocode-func"));
+    }
+
+    @Test
+    void createStack_withEcsAndElbV2Resources() {
+        String template = """
+            {
+              "Resources": {
+                "Cluster": {
+                  "Type": "AWS::ECS::Cluster",
+                  "Properties": {
+                    "ClusterName": "cfn-ecs-cluster"
+                  }
+                },
+                "TaskDefinition": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Family": "cfn-ecs-task",
+                    "Cpu": "256",
+                    "Memory": "512",
+                    "NetworkMode": "awsvpc",
+                    "ContainerDefinitions": [
+                      {
+                        "Name": "app",
+                        "Image": "nginx:latest",
+                        "Essential": true,
+                        "PortMappings": [
+                          {
+                            "ContainerPort": 80,
+                            "Protocol": "tcp"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "LoadBalancer": {
+                  "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+                  "Properties": {
+                    "Name": "cfn-ecs-alb",
+                    "Type": "application",
+                    "Scheme": "internal",
+                    "Subnets": ["subnet-a", "subnet-b"],
+                    "SecurityGroups": ["sg-a"]
+                  }
+                },
+                "TargetGroup": {
+                  "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+                  "Properties": {
+                    "Name": "cfn-ecs-tg",
+                    "Protocol": "HTTP",
+                    "Port": 80,
+                    "VpcId": "vpc-00000001",
+                    "TargetType": "ip",
+                    "HealthCheckPath": "/health"
+                  }
+                },
+                "Listener": {
+                  "Type": "AWS::ElasticLoadBalancingV2::Listener",
+                  "Properties": {
+                    "LoadBalancerArn": { "Ref": "LoadBalancer" },
+                    "Protocol": "HTTP",
+                    "Port": 8080,
+                    "DefaultActions": [
+                      {
+                        "Type": "forward",
+                        "TargetGroupArn": { "Ref": "TargetGroup" }
+                      }
+                    ]
+                  }
+                },
+                "Service": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "ServiceName": "cfn-ecs-service",
+                    "Cluster": { "Ref": "Cluster" },
+                    "TaskDefinition": { "Ref": "TaskDefinition" },
+                    "DesiredCount": 1,
+                    "LaunchType": "FARGATE",
+                    "LoadBalancers": [
+                      {
+                        "TargetGroupArn": { "Ref": "TargetGroup" },
+                        "ContainerName": "app",
+                        "ContainerPort": 80
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-ecs-elbv2-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String resources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-ecs-elbv2-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::ECS::Cluster</ResourceType>"))
+            .body(containsString("<ResourceType>AWS::ECS::TaskDefinition</ResourceType>"))
+            .body(containsString("<ResourceType>AWS::ECS::Service</ResourceType>"))
+            .body(containsString("<ResourceType>AWS::ElasticLoadBalancingV2::LoadBalancer</ResourceType>"))
+            .body(containsString("<ResourceType>AWS::ElasticLoadBalancingV2::TargetGroup</ResourceType>"))
+            .body(containsString("<ResourceType>AWS::ElasticLoadBalancingV2::Listener</ResourceType>"))
+            .body(not(containsString("arn:aws:stub:::")))
+            .extract()
+            .asString();
+
+        assertThat(physicalIdByLogicalId(resources, "Cluster"), equalTo("cfn-ecs-cluster"));
+        assertThat(physicalIdByLogicalId(resources, "TaskDefinition"),
+                matchesRegex("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-task:1"));
+        assertThat(physicalIdByLogicalId(resources, "LoadBalancer"),
+                startsWith("arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/cfn-ecs-alb/"));
+        assertThat(physicalIdByLogicalId(resources, "TargetGroup"),
+                startsWith("arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/cfn-ecs-tg/"));
+        assertThat(physicalIdByLogicalId(resources, "Listener"),
+                startsWith("arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/cfn-ecs-alb/"));
+        assertThat(physicalIdByLogicalId(resources, "Service"),
+                equalTo("arn:aws:ecs:us-east-1:000000000000:service/cfn-ecs-cluster/cfn-ecs-service"));
+
+        String clusterId = physicalIdByLogicalId(resources, "Cluster");
+        String loadBalancerArn = physicalIdByLogicalId(resources, "LoadBalancer");
+        String targetGroupArn = physicalIdByLogicalId(resources, "TargetGroup");
+        String listenerArn = physicalIdByLogicalId(resources, "Listener");
+        String serviceArn = physicalIdByLogicalId(resources, "Service");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-ecs-elbv2-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String updatedResources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-ecs-elbv2-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("arn:aws:stub:::")))
+            .extract()
+            .asString();
+
+        assertThat(physicalIdByLogicalId(updatedResources, "Cluster"), equalTo(clusterId));
+        assertThat(physicalIdByLogicalId(updatedResources, "LoadBalancer"), equalTo(loadBalancerArn));
+        assertThat(physicalIdByLogicalId(updatedResources, "TargetGroup"), equalTo(targetGroupArn));
+        assertThat(physicalIdByLogicalId(updatedResources, "Listener"), equalTo(listenerArn));
+        assertThat(physicalIdByLogicalId(updatedResources, "Service"), equalTo(serviceArn));
+        assertThat(physicalIdByLogicalId(updatedResources, "TaskDefinition"),
+                matchesRegex("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-task:[12]"));
+    }
+
+    @Test
+    void updateStack_withAutoNamedEcsResourcesReusesGeneratedPhysicalNames() {
+        String template = """
+            {
+              "Resources": {
+                "Cluster": {
+                  "Type": "AWS::ECS::Cluster"
+                },
+                "TaskDefinition": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Cpu": "256",
+                    "Memory": "512",
+                    "NetworkMode": "awsvpc",
+                    "ContainerDefinitions": [
+                      {
+                        "Name": "app",
+                        "Image": "nginx:latest",
+                        "Essential": true,
+                        "PortMappings": [
+                          {
+                            "ContainerPort": 80,
+                            "Protocol": "tcp"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "Service": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "Cluster": { "Ref": "Cluster" },
+                    "TaskDefinition": { "Ref": "TaskDefinition" },
+                    "DesiredCount": 0,
+                    "LaunchType": "FARGATE"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-auto-ecs-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String resources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-auto-ecs-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract()
+            .asString();
+
+        String clusterId = physicalIdByLogicalId(resources, "Cluster");
+        String serviceArn = physicalIdByLogicalId(resources, "Service");
+        String taskDefinitionArn = physicalIdByLogicalId(resources, "TaskDefinition");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-auto-ecs-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-auto-ecs-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>UPDATE_COMPLETE</StackStatus>"));
+
+        String updatedResources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-auto-ecs-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract()
+            .asString();
+
+        assertThat(physicalIdByLogicalId(updatedResources, "Cluster"), equalTo(clusterId));
+        assertThat(physicalIdByLogicalId(updatedResources, "Service"), equalTo(serviceArn));
+        assertThat(physicalIdByLogicalId(updatedResources, "TaskDefinition"),
+                startsWith(taskDefinitionArnRevisionPrefix(taskDefinitionArn)));
+    }
+
+    @Test
+    void createStack_withApiGatewayV2VpcLinkIntegration() {
+        String template = """
+            {
+              "Resources": {
+                "Api": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": {
+                    "Name": "cfn-http-api",
+                    "ProtocolType": "HTTP"
+                  }
+                },
+                "VpcLink": {
+                  "Type": "AWS::ApiGatewayV2::VpcLink",
+                  "Properties": {
+                    "Name": "cfn-vpc-link",
+                    "SubnetIds": ["subnet-a"],
+                    "SecurityGroupIds": ["sg-a"],
+                    "Tags": {
+                      "env": "test"
+                    }
+                  }
+                },
+                "Integration": {
+                  "Type": "AWS::ApiGatewayV2::Integration",
+                  "Properties": {
+                    "ApiId": { "Ref": "Api" },
+                    "IntegrationType": "HTTP_PROXY",
+                    "IntegrationMethod": "ANY",
+                    "IntegrationUri": "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/cfn-alb/abc/def",
+                    "ConnectionType": "VPC_LINK",
+                    "ConnectionId": { "Ref": "VpcLink" },
+                    "PayloadFormatVersion": "1.0",
+                    "TimeoutInMillis": 29000
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-apigwv2-vpclink-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String resources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-apigwv2-vpclink-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::ApiGatewayV2::VpcLink</ResourceType>"))
+            .body(containsString("<ResourceType>AWS::ApiGatewayV2::Integration</ResourceType>"))
+            .body(not(containsString("arn:aws:stub:::")))
+            .extract()
+            .asString();
+
+        String apiId = physicalIdByLogicalId(resources, "Api");
+        String vpcLinkId = physicalIdByLogicalId(resources, "VpcLink");
+        String integrationId = physicalIdByLogicalId(resources, "Integration");
+
+        given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetVpcLink")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"VpcLinkId\": \"%s\"}".formatted(vpcLinkId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("VpcLinkId", equalTo(vpcLinkId))
+            .body("VpcLinkStatus", equalTo("AVAILABLE"));
+
+        given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetIntegration")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"ApiId\": \"%s\", \"IntegrationId\": \"%s\"}".formatted(apiId, integrationId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("IntegrationId", equalTo(integrationId))
+            .body("IntegrationType", equalTo("HTTP_PROXY"))
+            .body("ConnectionType", equalTo("VPC_LINK"))
+            .body("ConnectionId", equalTo(vpcLinkId))
+            .body("IntegrationMethod", equalTo("ANY"))
+            .body("PayloadFormatVersion", equalTo("1.0"))
+            .body("TimeoutInMillis", equalTo(29000));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", "cfn-apigwv2-vpclink-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String updatedResources = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-apigwv2-vpclink-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("arn:aws:stub:::")))
+            .extract()
+            .asString();
+
+        assertThat(physicalIdByLogicalId(updatedResources, "Api"), equalTo(apiId));
+        assertThat(physicalIdByLogicalId(updatedResources, "VpcLink"), equalTo(vpcLinkId));
+        assertThat(physicalIdByLogicalId(updatedResources, "Integration"), equalTo(integrationId));
     }
 
     @Test

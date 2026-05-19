@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigateway;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.WebSocketConnectionManager;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,6 +26,7 @@ class ApiGatewayProxyMatchTest {
     @Mock VtlTemplateEngine vtlEngine;
     @Mock AwsServiceRouter serviceRouter;
     @Mock WebSocketConnectionManager webSocketConnectionManager;
+    @Mock ElbV2Service elbV2Service;
 
     private ApiGatewayExecuteController ctrl;
 
@@ -32,7 +34,7 @@ class ApiGatewayProxyMatchTest {
     void setUp() {
         ctrl = new ApiGatewayExecuteController(apiGatewayService, apiGatewayV2Service, lambdaService,
                 new RegionResolver("us-east-1", "000000000000"),
-                new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager);
+                new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service);
     }
 
     private ApiGatewayResource resource(String id, String parentId, String pathPart, String path) {

@@ -14,6 +14,7 @@ public class Integration {
     private String integrationUri;
     private String payloadFormatVersion; // 1.0, 2.0
     private String integrationMethod;
+    private String connectionId;
     private int timeoutInMillis;
     private Map<String, String> requestTemplates;
     private Map<String, String> responseTemplates;
@@ -39,6 +40,9 @@ public class Integration {
 
     public String getIntegrationMethod() { return integrationMethod; }
     public void setIntegrationMethod(String integrationMethod) { this.integrationMethod = integrationMethod; }
+
+    public String getConnectionId() { return connectionId; }
+    public void setConnectionId(String connectionId) { this.connectionId = connectionId; }
 
     public int getTimeoutInMillis() { return timeoutInMillis; }
     public void setTimeoutInMillis(int timeoutInMillis) { this.timeoutInMillis = timeoutInMillis; }

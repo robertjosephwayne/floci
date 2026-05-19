@@ -12,8 +12,26 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
+import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
+import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
+import io.github.hectorvent.floci.services.ecs.model.PortMapping;
+import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.services.elbv2.model.Action;
+import io.github.hectorvent.floci.services.elbv2.model.Listener;
+import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
+import io.github.hectorvent.floci.services.elbv2.model.Rule;
+import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
+import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -73,6 +91,8 @@ public class CloudFormationResourceProvisioner {
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final EcrService ecrService;
     private final PipesService pipesService;
+    private final EcsService ecsService;
+    private final ElbV2Service elbV2Service;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -84,7 +104,9 @@ public class CloudFormationResourceProvisioner {
                                              ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
-                                             PipesService pipesService) {
+                                             PipesService pipesService,
+                                             EcsService ecsService,
+                                             ElbV2Service elbV2Service) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -99,6 +121,8 @@ public class CloudFormationResourceProvisioner {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.ecrService = ecrService;
         this.pipesService = pipesService;
+        this.ecsService = ecsService;
+        this.elbV2Service = elbV2Service;
     }
 
     /**
@@ -165,6 +189,18 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGatewayV2::Integration" -> provisionApiGatewayV2Integration(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Stage" -> provisionApiGatewayV2Stage(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Deployment" -> provisionApiGatewayV2Deployment(resource, properties, engine, region);
+                case "AWS::ApiGatewayV2::VpcLink" -> provisionApiGatewayV2VpcLink(resource, properties, engine, region);
+                case "AWS::ECS::Cluster" -> provisionEcsCluster(resource, properties, engine, region, stackName);
+                case "AWS::ECS::TaskDefinition" -> provisionEcsTaskDefinition(resource, properties, engine, region, stackName);
+                case "AWS::ECS::Service" -> provisionEcsService(resource, properties, engine, region, stackName);
+                case "AWS::ElasticLoadBalancingV2::LoadBalancer" ->
+                        provisionElbV2LoadBalancer(resource, properties, engine, region, stackName);
+                case "AWS::ElasticLoadBalancingV2::TargetGroup" ->
+                        provisionElbV2TargetGroup(resource, properties, engine, region, stackName);
+                case "AWS::ElasticLoadBalancingV2::Listener" ->
+                        provisionElbV2Listener(resource, properties, engine, region);
+                case "AWS::ElasticLoadBalancingV2::ListenerRule" ->
+                        provisionElbV2ListenerRule(resource, properties, engine, region);
                 case "AWS::Pipes::Pipe" -> provisionPipe(resource, properties, engine, region, stackName);
                 case "AWS::Lambda::EventSourceMapping" ->
                         provisionLambdaEventSourceMapping(resource, properties, engine, region);
@@ -203,6 +239,14 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
                 case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
                 case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
+                case "AWS::ApiGatewayV2::VpcLink" -> apiGatewayV2Service.deleteVpcLink(region, physicalId);
+                case "AWS::ECS::Cluster" -> ecsService.deleteCluster(physicalId, region);
+                case "AWS::ECS::TaskDefinition" -> ecsService.deregisterTaskDefinition(physicalId, region);
+                case "AWS::ECS::Service" -> deleteEcsServiceSafe(physicalId, region);
+                case "AWS::ElasticLoadBalancingV2::LoadBalancer" -> elbV2Service.deleteLoadBalancer(region, physicalId);
+                case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
+                case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
+                case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
                 case "AWS::ECR::Repository" ->
                         ecrService.deleteRepository(physicalId, null, true, region);
                 case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
@@ -211,6 +255,42 @@ public class CloudFormationResourceProvisioner {
             }
         } catch (Exception e) {
             LOG.debugv("Error deleting {0} ({1}): {2}", resourceType, physicalId, e.getMessage());
+        }
+    }
+
+    public void delete(StackResource resource, String region) {
+        if (resource == null || resource.getPhysicalId() == null) {
+            return;
+        }
+
+        String apiId = resource.getAttributes() != null ? resource.getAttributes().get("ApiId") : null;
+        try {
+            switch (resource.getResourceType()) {
+                case "AWS::ApiGatewayV2::Route" -> {
+                    if (apiId != null) {
+                        apiGatewayV2Service.deleteRoute(region, apiId, resource.getPhysicalId());
+                    }
+                }
+                case "AWS::ApiGatewayV2::Integration" -> {
+                    if (apiId != null) {
+                        apiGatewayV2Service.deleteIntegration(region, apiId, resource.getPhysicalId());
+                    }
+                }
+                case "AWS::ApiGatewayV2::Stage" -> {
+                    if (apiId != null) {
+                        apiGatewayV2Service.deleteStage(region, apiId, resource.getPhysicalId());
+                    }
+                }
+                case "AWS::ApiGatewayV2::Deployment" -> {
+                    if (apiId != null) {
+                        apiGatewayV2Service.deleteDeployment(region, apiId, resource.getPhysicalId());
+                    }
+                }
+                default -> delete(resource.getResourceType(), resource.getPhysicalId(), region);
+            }
+        } catch (Exception e) {
+            LOG.debugv("Error deleting {0} ({1}): {2}",
+                    resource.getResourceType(), resource.getPhysicalId(), e.getMessage());
         }
     }
 
@@ -1371,6 +1451,300 @@ public class CloudFormationResourceProvisioner {
         return out;
     }
 
+    private Map<String, String> resolveStringMapOrEmpty(JsonNode props, String source,
+                                                        CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return Map.of();
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null || !resolved.isObject()) {
+            return Map.of();
+        }
+        Map<String, String> values = new HashMap<>();
+        resolved.fields().forEachRemaining(e -> values.put(e.getKey(), e.getValue().asText()));
+        return values;
+    }
+
+    private List<ContainerDefinition> parseContainerDefinitions(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<ContainerDefinition> definitions = new ArrayList<>();
+        for (JsonNode item : resolved) {
+            ContainerDefinition definition = new ContainerDefinition();
+            definition.setName(item.path("Name").asText());
+            definition.setImage(item.path("Image").asText());
+            definition.setEssential(item.path("Essential").asBoolean(true));
+            if (item.has("Cpu")) {
+                definition.setCpu(item.path("Cpu").asInt());
+            }
+            if (item.has("Memory")) {
+                definition.setMemory(item.path("Memory").asInt());
+            }
+            if (item.has("MemoryReservation")) {
+                definition.setMemoryReservation(item.path("MemoryReservation").asInt());
+            }
+            definition.setPortMappings(parsePortMappings(item.path("PortMappings")));
+            definition.setEnvironment(parseEnvironment(item.path("Environment")));
+            definition.setCommand(parseStringArray(item.path("Command")));
+            definition.setEntryPoint(parseStringArray(item.path("EntryPoint")));
+            definitions.add(definition);
+        }
+        return definitions;
+    }
+
+    private List<PortMapping> parsePortMappings(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<PortMapping> mappings = new ArrayList<>();
+        for (JsonNode item : node) {
+            mappings.add(new PortMapping(
+                    item.path("ContainerPort").asInt(0),
+                    item.path("HostPort").asInt(0),
+                    item.path("Protocol").asText("tcp")));
+        }
+        return mappings;
+    }
+
+    private List<KeyValuePair> parseEnvironment(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<KeyValuePair> environment = new ArrayList<>();
+        for (JsonNode item : node) {
+            environment.add(new KeyValuePair(item.path("Name").asText(), item.path("Value").asText()));
+        }
+        return environment;
+    }
+
+    private List<String> parseStringArray(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        node.forEach(value -> values.add(value.asText()));
+        return values;
+    }
+
+    private NetworkMode parseNetworkMode(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return NetworkMode.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private LaunchType parseLaunchType(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return LaunchType.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private List<Action> parseElbV2Actions(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<Action> actions = new ArrayList<>();
+        for (JsonNode item : resolved) {
+            Action action = new Action();
+            action.setType(item.path("Type").asText());
+            if (item.has("Order")) {
+                action.setOrder(item.path("Order").asInt());
+            }
+            if (item.has("TargetGroupArn")) {
+                action.setTargetGroupArn(item.path("TargetGroupArn").asText());
+            }
+            JsonNode forwardConfig = item.path("ForwardConfig");
+            if (!forwardConfig.isMissingNode()) {
+                action.setTargetGroups(parseTargetGroupTuples(forwardConfig.path("TargetGroups")));
+                JsonNode stickiness = forwardConfig.path("TargetGroupStickinessConfig");
+                if (!stickiness.isMissingNode()) {
+                    if (stickiness.has("Enabled")) {
+                        action.setStickinessEnabled(stickiness.path("Enabled").asBoolean());
+                    }
+                    if (stickiness.has("DurationSeconds")) {
+                        action.setStickinessDurationSeconds(stickiness.path("DurationSeconds").asInt());
+                    }
+                }
+            }
+            JsonNode fixedResponse = item.path("FixedResponseConfig");
+            if (!fixedResponse.isMissingNode()) {
+                action.setFixedResponseStatusCode(fixedResponse.path("StatusCode").asText(null));
+                action.setFixedResponseContentType(fixedResponse.path("ContentType").asText(null));
+                action.setFixedResponseMessageBody(fixedResponse.path("MessageBody").asText(null));
+            }
+            JsonNode redirect = item.path("RedirectConfig");
+            if (!redirect.isMissingNode()) {
+                action.setRedirectProtocol(redirect.path("Protocol").asText(null));
+                action.setRedirectPort(redirect.path("Port").asText(null));
+                action.setRedirectHost(redirect.path("Host").asText(null));
+                action.setRedirectPath(redirect.path("Path").asText(null));
+                action.setRedirectQuery(redirect.path("Query").asText(null));
+                action.setRedirectStatusCode(redirect.path("StatusCode").asText(null));
+            }
+            actions.add(action);
+        }
+        return actions;
+    }
+
+    private List<Action.TargetGroupTuple> parseTargetGroupTuples(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<Action.TargetGroupTuple> tuples = new ArrayList<>();
+        for (JsonNode item : node) {
+            Action.TargetGroupTuple tuple = new Action.TargetGroupTuple();
+            tuple.setTargetGroupArn(item.path("TargetGroupArn").asText());
+            if (item.has("Weight")) {
+                tuple.setWeight(item.path("Weight").asInt());
+            }
+            tuples.add(tuple);
+        }
+        return tuples;
+    }
+
+    private List<RuleCondition> parseRuleConditions(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<RuleCondition> conditions = new ArrayList<>();
+        for (JsonNode item : resolved) {
+            RuleCondition condition = new RuleCondition();
+            condition.setField(item.path("Field").asText());
+            condition.setValues(parseStringArray(item.path("Values")));
+            condition.setHostHeaderValues(parseConfigValues(item.path("HostHeaderConfig")));
+            condition.setPathPatternValues(parseConfigValues(item.path("PathPatternConfig")));
+            condition.setHttpMethodValues(parseConfigValues(item.path("HttpRequestMethodConfig")));
+            condition.setSourceIpValues(parseConfigValues(item.path("SourceIpConfig")));
+            JsonNode headerConfig = item.path("HttpHeaderConfig");
+            if (!headerConfig.isMissingNode()) {
+                condition.setHttpHeaderName(headerConfig.path("HttpHeaderName").asText(null));
+                condition.setHttpHeaderValues(parseConfigValues(headerConfig));
+            }
+            condition.setQueryStringValues(parseQueryStringPairs(item.path("QueryStringConfig").path("Values")));
+            conditions.add(condition);
+        }
+        return conditions;
+    }
+
+    private List<String> parseConfigValues(JsonNode configNode) {
+        return parseStringArray(configNode.path("Values"));
+    }
+
+    private List<RuleCondition.QueryStringPair> parseQueryStringPairs(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<RuleCondition.QueryStringPair> pairs = new ArrayList<>();
+        for (JsonNode item : node) {
+            RuleCondition.QueryStringPair pair = new RuleCondition.QueryStringPair();
+            pair.setKey(item.path("Key").asText(null));
+            pair.setValue(item.path("Value").asText(null));
+            pairs.add(pair);
+        }
+        return pairs;
+    }
+
+    private List<TargetDescription> parseTargetDescriptions(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<TargetDescription> targets = new ArrayList<>();
+        for (JsonNode item : resolved) {
+            TargetDescription target = new TargetDescription();
+            target.setId(item.path("Id").asText());
+            if (item.has("Port")) {
+                target.setPort(item.path("Port").asInt());
+            }
+            target.setAvailabilityZone(item.path("AvailabilityZone").asText(null));
+            targets.add(target);
+        }
+        return targets;
+    }
+
+    private List<EcsLoadBalancer> parseServiceLoadBalancers(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
+        for (JsonNode item : resolved) {
+            EcsLoadBalancer loadBalancer = new EcsLoadBalancer();
+            loadBalancer.setTargetGroupArn(item.path("TargetGroupArn").asText(null));
+            loadBalancer.setLoadBalancerName(item.path("LoadBalancerName").asText(null));
+            loadBalancer.setContainerName(item.path("ContainerName").asText(null));
+            if (item.has("ContainerPort")) {
+                loadBalancer.setContainerPort(item.path("ContainerPort").asInt());
+            }
+            loadBalancers.add(loadBalancer);
+        }
+        return loadBalancers;
+    }
+
+    private List<String> parseCertificateArns(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<String> certificateArns = new ArrayList<>();
+        for (JsonNode item : resolved) {
+            certificateArns.add(item.path("CertificateArn").asText());
+        }
+        return certificateArns;
+    }
+
+    private String matcherHttpCode(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("Matcher") || props.get("Matcher").isNull()) {
+            return null;
+        }
+        JsonNode matcher = engine.resolveNode(props.get("Matcher"));
+        return matcher.path("HttpCode").asText(null);
+    }
+
+    private static Integer intOrNull(String value) {
+        return value != null && !value.isBlank() ? Integer.parseInt(value) : null;
+    }
+
+    private static Boolean boolOrNull(String value) {
+        return value != null && !value.isBlank() ? Boolean.parseBoolean(value) : null;
+    }
+
+    private String elbV2FullName(String arn, String marker) {
+        int markerIndex = arn.indexOf(marker);
+        return markerIndex >= 0 ? arn.substring(markerIndex + marker.length()) : arn;
+    }
+
     private void provisionRoute53HostedZone(StackResource r, JsonNode props, CloudFormationTemplateEngine engine) {
         String zoneId = "Z" + UUID.randomUUID().toString().substring(0, 12).toUpperCase();
         r.setPhysicalId(zoneId);
@@ -1491,8 +1865,14 @@ public class CloudFormationResourceProvisioner {
         Map<String, Object> req = new HashMap<>();
         req.put("name", name);
         req.put("protocolType", resolveOrDefault(props, "ProtocolType", engine, "HTTP"));
+        req.put("description", resolveOptional(props, "Description", engine));
+        req.put("routeSelectionExpression", resolveOptional(props, "RouteSelectionExpression", engine));
+        req.put("apiKeySelectionExpression", resolveOptional(props, "ApiKeySelectionExpression", engine));
+        req.put("tags", resolveStringMapOrEmpty(props, "Tags", engine));
 
-        Api api = apiGatewayV2Service.createApi(region, req);
+        Api api = r.getPhysicalId() != null
+                ? apiGatewayV2Service.updateApi(region, r.getPhysicalId(), req)
+                : apiGatewayV2Service.createApi(region, req);
         r.setPhysicalId(api.getApiId());
         r.getAttributes().put("ApiEndpoint", api.getApiEndpoint());
     }
@@ -1505,8 +1885,11 @@ public class CloudFormationResourceProvisioner {
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
         req.put("target", resolveOptional(props, "Target", engine));
 
-        Route route = apiGatewayV2Service.createRoute(region, apiId, req);
+        Route route = r.getPhysicalId() != null
+                ? apiGatewayV2Service.updateRoute(region, apiId, r.getPhysicalId(), req)
+                : apiGatewayV2Service.createRoute(region, apiId, req);
         r.setPhysicalId(route.getRouteId());
+        r.getAttributes().put("ApiId", apiId);
     }
 
     private void provisionApiGatewayV2Integration(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -1516,22 +1899,40 @@ public class CloudFormationResourceProvisioner {
         req.put("integrationType", resolveOptional(props, "IntegrationType", engine));
         req.put("integrationUri", resolveOptional(props, "IntegrationUri", engine));
         req.put("payloadFormatVersion", resolveOrDefault(props, "PayloadFormatVersion", engine, "2.0"));
+        req.put("integrationMethod", resolveOptional(props, "IntegrationMethod", engine));
+        req.put("connectionType", resolveOptional(props, "ConnectionType", engine));
+        req.put("connectionId", resolveOptional(props, "ConnectionId", engine));
+        String timeout = resolveOptional(props, "TimeoutInMillis", engine);
+        if (timeout != null) {
+            req.put("timeoutInMillis", Integer.parseInt(timeout));
+        }
 
-        Integration integration = apiGatewayV2Service.createIntegration(region, apiId, req);
+        Integration integration = r.getPhysicalId() != null
+                ? apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req)
+                : apiGatewayV2Service.createIntegration(region, apiId, req);
         r.setPhysicalId(integration.getIntegrationId());
+        r.getAttributes().put("ApiId", apiId);
     }
 
     private void provisionApiGatewayV2Stage(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                             String region) {
         String apiId = resolveOptional(props, "ApiId", engine);
         String stageName = resolveOptional(props, "StageName", engine);
+        if (stageName == null || stageName.isBlank()) {
+            stageName = r.getPhysicalId() != null ? r.getPhysicalId() : "$default";
+        }
 
         Map<String, Object> req = new HashMap<>();
         req.put("stageName", stageName);
         req.put("autoDeploy", resolveOrDefault(props, "AutoDeploy", engine, "false"));
+        req.put("deploymentId", resolveOptional(props, "DeploymentId", engine));
+        req.put("stageVariables", resolveStringMapOrEmpty(props, "StageVariables", engine));
 
-        Stage stage = apiGatewayV2Service.createStage(region, apiId, req);
-        r.setPhysicalId(stageName);
+        Stage stage = r.getPhysicalId() != null && Objects.equals(r.getPhysicalId(), stageName)
+                ? apiGatewayV2Service.updateStage(region, apiId, r.getPhysicalId(), req)
+                : apiGatewayV2Service.createStage(region, apiId, req);
+        r.setPhysicalId(stage.getStageName());
+        r.getAttributes().put("ApiId", apiId);
     }
 
     private void provisionApiGatewayV2Deployment(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -1542,6 +1943,281 @@ public class CloudFormationResourceProvisioner {
 
         Deployment deployment = apiGatewayV2Service.createDeployment(region, apiId, req);
         r.setPhysicalId(deployment.getDeploymentId());
+        r.getAttributes().put("ApiId", apiId);
+    }
+
+    private void provisionApiGatewayV2VpcLink(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                              String region) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("name", resolveOptional(props, "Name", engine));
+        req.put("securityGroupIds", resolveStringListOrEmpty(props, "SecurityGroupIds", engine));
+        req.put("subnetIds", resolveStringListOrEmpty(props, "SubnetIds", engine));
+        req.put("tags", resolveStringMapOrEmpty(props, "Tags", engine));
+
+        VpcLink vpcLink = r.getPhysicalId() != null
+                ? apiGatewayV2Service.updateVpcLink(region, r.getPhysicalId(), req)
+                : apiGatewayV2Service.createVpcLink(region, req);
+        r.setPhysicalId(vpcLink.getVpcLinkId());
+        r.getAttributes().put("VpcLinkId", vpcLink.getVpcLinkId());
+    }
+
+    // ── ECS ──────────────────────────────────────────────────────────────────
+
+    private void provisionEcsCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                     String region, String stackName) {
+        String name = resolveOptional(props, "ClusterName", engine);
+        if (name == null || name.isBlank()) {
+            name = r.getPhysicalId() != null
+                    ? r.getPhysicalId()
+                    : generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        EcsCluster cluster = ecsService.createCluster(name, region);
+        cluster.setTags(parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        r.setPhysicalId(cluster.getClusterName());
+        r.getAttributes().put("Arn", cluster.getClusterArn());
+    }
+
+    private void provisionEcsTaskDefinition(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                            String region, String stackName) {
+        String family = resolveOptional(props, "Family", engine);
+        if (family == null || family.isBlank()) {
+            String existingFamily = ecsTaskFamilyFromArn(r.getPhysicalId());
+            family = existingFamily != null
+                    ? existingFamily
+                    : generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+
+        TaskDefinition taskDefinition = ecsService.registerTaskDefinition(
+                family,
+                parseContainerDefinitions(props != null ? props.get("ContainerDefinitions") : null, engine),
+                parseNetworkMode(resolveOptional(props, "NetworkMode", engine)),
+                resolveOptional(props, "Cpu", engine),
+                resolveOptional(props, "Memory", engine),
+                region);
+        taskDefinition.setTags(parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        r.setPhysicalId(taskDefinition.getTaskDefinitionArn());
+        r.getAttributes().put("TaskDefinitionArn", taskDefinition.getTaskDefinitionArn());
+    }
+
+    private void provisionEcsService(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                     String region, String stackName) {
+        String serviceName = resolveOptional(props, "ServiceName", engine);
+        if (serviceName == null || serviceName.isBlank()) {
+            String existingServiceName = ecsServiceNameFromArn(r.getPhysicalId());
+            serviceName = existingServiceName != null
+                    ? existingServiceName
+                    : generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        String cluster = resolveOptional(props, "Cluster", engine);
+        String taskDefinition = resolveOptional(props, "TaskDefinition", engine);
+        int desiredCount = intOrDefault(resolveOptional(props, "DesiredCount", engine), 1);
+        LaunchType launchType = parseLaunchType(resolveOptional(props, "LaunchType", engine));
+        List<EcsLoadBalancer> loadBalancers =
+                parseServiceLoadBalancers(props != null ? props.get("LoadBalancers") : null, engine);
+
+        EcsServiceModel service = r.getPhysicalId() != null
+                ? ecsService.updateService(cluster, serviceName, taskDefinition, desiredCount, loadBalancers, region)
+                : ecsService.createService(cluster, serviceName, taskDefinition,
+                        desiredCount, launchType, loadBalancers, region);
+        service.setTags(parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        r.setPhysicalId(service.getServiceArn());
+        r.getAttributes().put("Name", service.getServiceName());
+        r.getAttributes().put("ServiceArn", service.getServiceArn());
+    }
+
+    // ── ELBv2 ────────────────────────────────────────────────────────────────
+
+    private void provisionElbV2LoadBalancer(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                            String region, String stackName) {
+        String name = resolveOptional(props, "Name", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 32, false);
+        }
+
+        LoadBalancer loadBalancer = existingLoadBalancer(region, r.getPhysicalId());
+        if (loadBalancer == null) {
+            loadBalancer = elbV2Service.createLoadBalancer(
+                    region,
+                    name,
+                    resolveOptional(props, "Scheme", engine),
+                    resolveOptional(props, "Type", engine),
+                    resolveOptional(props, "IpAddressType", engine),
+                    resolveStringListOrEmpty(props, "Subnets", engine),
+                    resolveStringListOrEmpty(props, "SecurityGroups", engine),
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        } else {
+            if (props != null && props.has("Subnets")) {
+                elbV2Service.setSubnets(region, loadBalancer.getLoadBalancerArn(),
+                        resolveStringListOrEmpty(props, "Subnets", engine));
+            }
+            if (props != null && props.has("SecurityGroups")) {
+                elbV2Service.setSecurityGroups(region, loadBalancer.getLoadBalancerArn(),
+                        resolveStringListOrEmpty(props, "SecurityGroups", engine));
+            }
+            if (props != null && props.has("IpAddressType")) {
+                elbV2Service.setIpAddressType(region, loadBalancer.getLoadBalancerArn(),
+                        resolveOptional(props, "IpAddressType", engine));
+            }
+        }
+        r.setPhysicalId(loadBalancer.getLoadBalancerArn());
+        r.getAttributes().put("CanonicalHostedZoneID", loadBalancer.getCanonicalHostedZoneId());
+        r.getAttributes().put("DNSName", loadBalancer.getDnsName());
+        r.getAttributes().put("LoadBalancerArn", loadBalancer.getLoadBalancerArn());
+        r.getAttributes().put("LoadBalancerFullName", elbV2FullName(loadBalancer.getLoadBalancerArn(), "loadbalancer/"));
+        r.getAttributes().put("LoadBalancerName", loadBalancer.getLoadBalancerName());
+    }
+
+    private void provisionElbV2TargetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                           String region, String stackName) {
+        String name = resolveOptional(props, "Name", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 32, false);
+        }
+
+        TargetGroup targetGroup = existingTargetGroup(region, r.getPhysicalId());
+        if (targetGroup == null) {
+            targetGroup = elbV2Service.createTargetGroup(
+                    region,
+                    name,
+                    resolveOptional(props, "Protocol", engine),
+                    resolveOptional(props, "ProtocolVersion", engine),
+                    intOrNull(resolveOptional(props, "Port", engine)),
+                    resolveOptional(props, "VpcId", engine),
+                    resolveOptional(props, "TargetType", engine),
+                    resolveOptional(props, "HealthCheckProtocol", engine),
+                    resolveOptional(props, "HealthCheckPort", engine),
+                    boolOrNull(resolveOptional(props, "HealthCheckEnabled", engine)),
+                    resolveOptional(props, "HealthCheckPath", engine),
+                    intOrNull(resolveOptional(props, "HealthCheckIntervalSeconds", engine)),
+                    intOrNull(resolveOptional(props, "HealthCheckTimeoutSeconds", engine)),
+                    intOrNull(resolveOptional(props, "HealthyThresholdCount", engine)),
+                    intOrNull(resolveOptional(props, "UnhealthyThresholdCount", engine)),
+                    matcherHttpCode(props, engine),
+                    resolveOptional(props, "IpAddressType", engine),
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        } else {
+            elbV2Service.modifyTargetGroup(
+                    region,
+                    targetGroup.getTargetGroupArn(),
+                    resolveOptional(props, "HealthCheckProtocol", engine),
+                    resolveOptional(props, "HealthCheckPort", engine),
+                    boolOrNull(resolveOptional(props, "HealthCheckEnabled", engine)),
+                    resolveOptional(props, "HealthCheckPath", engine),
+                    intOrNull(resolveOptional(props, "HealthCheckIntervalSeconds", engine)),
+                    intOrNull(resolveOptional(props, "HealthCheckTimeoutSeconds", engine)),
+                    intOrNull(resolveOptional(props, "HealthyThresholdCount", engine)),
+                    intOrNull(resolveOptional(props, "UnhealthyThresholdCount", engine)),
+                    matcherHttpCode(props, engine));
+        }
+        if (props != null && props.has("Targets")) {
+            elbV2Service.registerTargets(region, targetGroup.getTargetGroupArn(),
+                    parseTargetDescriptions(props.get("Targets"), engine));
+        }
+        r.setPhysicalId(targetGroup.getTargetGroupArn());
+        r.getAttributes().put("TargetGroupArn", targetGroup.getTargetGroupArn());
+        r.getAttributes().put("TargetGroupFullName", elbV2FullName(targetGroup.getTargetGroupArn(), "targetgroup/"));
+        r.getAttributes().put("TargetGroupName", targetGroup.getTargetGroupName());
+    }
+
+    private void provisionElbV2Listener(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                        String region) {
+        Listener listener = existingListener(region, r.getPhysicalId());
+        if (listener == null) {
+            listener = elbV2Service.createListener(
+                    region,
+                    resolveOptional(props, "LoadBalancerArn", engine),
+                    resolveOptional(props, "Protocol", engine),
+                    intOrNull(resolveOptional(props, "Port", engine)),
+                    resolveOptional(props, "SslPolicy", engine),
+                    parseCertificateArns(props != null ? props.get("Certificates") : null, engine),
+                    parseElbV2Actions(props != null ? props.get("DefaultActions") : null, engine),
+                    resolveStringListOrEmpty(props, "AlpnPolicy", engine),
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        } else {
+            listener = elbV2Service.modifyListener(
+                    region,
+                    listener.getListenerArn(),
+                    resolveOptional(props, "Protocol", engine),
+                    intOrNull(resolveOptional(props, "Port", engine)),
+                    resolveOptional(props, "SslPolicy", engine),
+                    parseCertificateArns(props != null ? props.get("Certificates") : null, engine),
+                    parseElbV2Actions(props != null ? props.get("DefaultActions") : null, engine),
+                    resolveStringListOrEmpty(props, "AlpnPolicy", engine));
+        }
+        r.setPhysicalId(listener.getListenerArn());
+        r.getAttributes().put("ListenerArn", listener.getListenerArn());
+    }
+
+    private void provisionElbV2ListenerRule(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                            String region) {
+        Rule rule = existingRule(region, r.getPhysicalId());
+        if (rule == null) {
+            rule = elbV2Service.createRule(
+                    region,
+                    resolveOptional(props, "ListenerArn", engine),
+                    parseRuleConditions(props != null ? props.get("Conditions") : null, engine),
+                    intOrDefault(resolveOptional(props, "Priority", engine), 1),
+                    parseElbV2Actions(props != null ? props.get("Actions") : null, engine),
+                    parseCfnTags(props != null ? props.get("Tags") : null, engine));
+        } else {
+            rule = elbV2Service.modifyRule(
+                    region,
+                    rule.getRuleArn(),
+                    parseRuleConditions(props != null ? props.get("Conditions") : null, engine),
+                    parseElbV2Actions(props != null ? props.get("Actions") : null, engine));
+            if (props != null && props.has("Priority")) {
+                elbV2Service.setRulePriorities(region, Map.of(rule.getRuleArn(),
+                        intOrDefault(resolveOptional(props, "Priority", engine), 1)));
+            }
+        }
+        r.setPhysicalId(rule.getRuleArn());
+        r.getAttributes().put("RuleArn", rule.getRuleArn());
+    }
+
+    private LoadBalancer existingLoadBalancer(String region, String arn) {
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        try {
+            List<LoadBalancer> loadBalancers = elbV2Service.describeLoadBalancers(region, List.of(arn), null, null, null);
+            return loadBalancers.isEmpty() ? null : loadBalancers.get(0);
+        } catch (AwsException e) {
+            if ("LoadBalancerNotFound".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private TargetGroup existingTargetGroup(String region, String arn) {
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        try {
+            List<TargetGroup> targetGroups = elbV2Service.describeTargetGroups(region, null, List.of(arn), null);
+            return targetGroups.isEmpty() ? null : targetGroups.get(0);
+        } catch (AwsException e) {
+            if ("TargetGroupNotFound".equals(e.getErrorCode())) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private Listener existingListener(String region, String arn) {
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        List<Listener> listeners = elbV2Service.describeListeners(region, null, List.of(arn));
+        return listeners.isEmpty() ? null : listeners.get(0);
+    }
+
+    private Rule existingRule(String region, String arn) {
+        if (arn == null || arn.isBlank()) {
+            return null;
+        }
+        List<Rule> rules = elbV2Service.describeRules(region, null, List.of(arn));
+        return rules.isEmpty() ? null : rules.get(0);
     }
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {
@@ -1578,6 +2254,35 @@ public class CloudFormationResourceProvisioner {
         } catch (Exception e) {
             LOG.debugv("Could not delete policy {0}: {1}", policyArn, e.getMessage());
         }
+    }
+
+    private void deleteEcsServiceSafe(String serviceArn, String region) {
+        String[] parts = serviceArn.split("/");
+        if (parts.length < 3) {
+            return;
+        }
+        ecsService.deleteService(parts[parts.length - 2], parts[parts.length - 1], true, region);
+    }
+
+    private String ecsTaskFamilyFromArn(String taskDefinitionArn) {
+        if (taskDefinitionArn == null || taskDefinitionArn.isBlank()) {
+            return null;
+        }
+        int marker = taskDefinitionArn.indexOf("task-definition/");
+        if (marker < 0) {
+            return null;
+        }
+        String familyRevision = taskDefinitionArn.substring(marker + "task-definition/".length());
+        int revision = familyRevision.lastIndexOf(':');
+        return revision > 0 ? familyRevision.substring(0, revision) : familyRevision;
+    }
+
+    private String ecsServiceNameFromArn(String serviceArn) {
+        if (serviceArn == null || serviceArn.isBlank()) {
+            return null;
+        }
+        String[] parts = serviceArn.split("/");
+        return parts.length >= 3 ? parts[parts.length - 1] : null;
     }
 
     /**

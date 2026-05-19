@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.WebSocketConnectionManager;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -64,13 +66,15 @@ public class ApiGatewayExecuteController {
     private final VtlTemplateEngine vtlEngine;
     private final AwsServiceRouter serviceRouter;
     private final WebSocketConnectionManager webSocketConnectionManager;
+    private final ElbV2Service elbV2Service;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
                                        LambdaService lambdaService, RegionResolver regionResolver,
                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
                                        AwsServiceRouter serviceRouter,
-                                       WebSocketConnectionManager webSocketConnectionManager) {
+                                       WebSocketConnectionManager webSocketConnectionManager,
+                                       ElbV2Service elbV2Service) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -79,6 +83,7 @@ public class ApiGatewayExecuteController {
         this.vtlEngine = vtlEngine;
         this.serviceRouter = serviceRouter;
         this.webSocketConnectionManager = webSocketConnectionManager;
+        this.elbV2Service = elbV2Service;
     }
 
     private record AuthorizerResult(Response errorResponse, String principalId, Map<String, Object> context) {}
@@ -987,7 +992,7 @@ public class ApiGatewayExecuteController {
         if (integrationType == null || integrationType.isEmpty()) integrationType = "AWS_PROXY";
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
-            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName);
+            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName, region);
         }
 
         String functionName = functionNameFromUri(integration.getIntegrationUri());
@@ -1023,7 +1028,7 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName) {
+                                          String apiId, String stageName, String region) {
         Map<String, String> requestHeaders = new java.util.LinkedHashMap<>();
         for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
             requestHeaders.put(e.getKey(), String.join(",", e.getValue()));
@@ -1055,8 +1060,9 @@ public class ApiGatewayExecuteController {
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, integration.getIntegrationUri());
 
+        String integrationUri = resolveHttpProxyIntegrationUri(integration, path, region);
         io.github.hectorvent.floci.services.apigatewayv2.proxy.ProxyResult result =
-                httpProxyInvoker.invoke(integration, ctx);
+                httpProxyInvoker.invoke(integration, ctx, integrationUri);
 
         Response.ResponseBuilder rb = Response.status(result.statusCode());
         if (result.body() != null) rb.entity(result.body());
@@ -1066,6 +1072,25 @@ public class ApiGatewayExecuteController {
             }
         }
         return rb.build();
+    }
+
+    private String resolveHttpProxyIntegrationUri(
+            io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
+            String path,
+            String region) {
+        String integrationUri = integration.getIntegrationUri();
+        if (!"VPC_LINK".equalsIgnoreCase(integration.getConnectionType())
+                || integrationUri == null
+                || !integrationUri.startsWith("arn:aws:elasticloadbalancing:")) {
+            return integrationUri;
+        }
+
+        List<Listener> listeners = elbV2Service.describeListeners(region, null, List.of(integrationUri));
+        if (listeners.isEmpty()) {
+            throw new AwsException("IntegrationFailure", "ELBv2 listener not found: " + integrationUri, 502);
+        }
+        Listener listener = listeners.get(0);
+        return "http://localhost:" + listener.getPort() + path;
     }
 
     private static String extractBearerToken(HttpHeaders headers) {

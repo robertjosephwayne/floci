@@ -75,6 +75,11 @@ public class ApiGatewayV2JsonHandler {
                 case "GetModels" -> handleGetModels(request, region);
                 case "UpdateModel" -> handleUpdateModel(request, region);
                 case "DeleteModel" -> handleDeleteModel(request, region);
+                case "CreateVpcLink" -> handleCreateVpcLink(request, region);
+                case "GetVpcLink" -> handleGetVpcLink(request, region);
+                case "GetVpcLinks" -> handleGetVpcLinks(region);
+                case "UpdateVpcLink" -> handleUpdateVpcLink(request, region);
+                case "DeleteVpcLink" -> handleDeleteVpcLink(request, region);
                 case "TagResource" -> handleTagResource(request, region);
                 case "UntagResource" -> handleUntagResource(request, region);
                 case "GetTags" -> handleGetTags(request, region);
@@ -418,6 +423,42 @@ public class ApiGatewayV2JsonHandler {
         return Response.noContent().build();
     }
 
+    // ──────────────────────────── VPC Link ────────────────────────────
+
+    private Response handleCreateVpcLink(JsonNode request, String region) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
+        VpcLink vpcLink = service.createVpcLink(region, map);
+        return Response.status(201).entity(toVpcLinkNode(vpcLink).toString()).build();
+    }
+
+    private Response handleGetVpcLink(JsonNode request, String region) {
+        String vpcLinkId = request.path("VpcLinkId").asText();
+        return Response.ok(toVpcLinkNode(service.getVpcLink(region, vpcLinkId)).toString()).build();
+    }
+
+    private Response handleGetVpcLinks(String region) {
+        List<VpcLink> vpcLinks = service.getVpcLinks(region);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        vpcLinks.forEach(v -> items.add(toVpcLinkNode(v)));
+        return Response.ok(root.toString()).build();
+    }
+
+    private Response handleDeleteVpcLink(JsonNode request, String region) {
+        String vpcLinkId = request.path("VpcLinkId").asText();
+        service.deleteVpcLink(region, vpcLinkId);
+        return Response.noContent().build();
+    }
+
+    private Response handleUpdateVpcLink(JsonNode request, String region) {
+        String vpcLinkId = request.path("VpcLinkId").asText();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
+        VpcLink vpcLink = service.updateVpcLink(region, vpcLinkId, map);
+        return Response.ok(toVpcLinkNode(vpcLink).toString()).build();
+    }
+
     // ──────────────────────────── Model ────────────────────────────
 
     private Response handleCreateModel(JsonNode request, String region) {
@@ -583,8 +624,34 @@ public class ApiGatewayV2JsonHandler {
         if (i.getIntegrationMethod() != null) {
             node.put("IntegrationMethod", i.getIntegrationMethod());
         }
+        if (i.getConnectionType() != null) {
+            node.put("ConnectionType", i.getConnectionType());
+        }
+        if (i.getConnectionId() != null) {
+            node.put("ConnectionId", i.getConnectionId());
+        }
         if (i.getTimeoutInMillis() != 0) {
             node.put("TimeoutInMillis", i.getTimeoutInMillis());
+        }
+        return node;
+    }
+
+    private ObjectNode toVpcLinkNode(VpcLink v) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("VpcLinkId", v.getVpcLinkId());
+        node.put("Name", v.getName());
+        node.put("VpcLinkStatus", v.getVpcLinkStatus());
+        ArrayNode securityGroups = node.putArray("SecurityGroupIds");
+        if (v.getSecurityGroupIds() != null) {
+            v.getSecurityGroupIds().forEach(securityGroups::add);
+        }
+        ArrayNode subnets = node.putArray("SubnetIds");
+        if (v.getSubnetIds() != null) {
+            v.getSubnetIds().forEach(subnets::add);
+        }
+        if (v.getTags() != null && !v.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("Tags");
+            v.getTags().forEach(tags::put);
         }
         return node;
     }

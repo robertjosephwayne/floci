@@ -430,8 +430,11 @@ public class EcsJsonHandler {
         String serviceName = req.path("service").asText();
         String taskDefinition = req.has("taskDefinition") ? req.path("taskDefinition").asText() : null;
         Integer desiredCount = req.has("desiredCount") ? req.path("desiredCount").asInt() : null;
+        List<EcsLoadBalancer> loadBalancers = req.has("loadBalancers")
+                ? parseLoadBalancers(req.path("loadBalancers")) : null;
 
-        EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount, region);
+        EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
+                loadBalancers, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
